@@ -1,0 +1,177 @@
+// Floating, always-on-top, transparent, draggable image widget.
+//
+// Usage:
+//   cargo run --release -- path/to/image.png
+//
+// Controls:
+//   - Left-click + drag the image  -> moves the window anywhere on screen
+//   - Right-click the image        -> closes the app
+//   - Scroll wheel over the image  -> resizes it up/down
+
+use eframe::egui;
+use egui::{ViewportBuilder, ViewportCommand};
+
+fn main() -> eframe::Result<()> {
+    let path = std::env::args()
+    .nth(1)
+    .unwrap_or_else(|| "image.png".to_string());
+
+    let image_bytes = std::fs::read(&path).unwrap_or_else(|e| {
+        eprintln!("Failed to read image at '{path}': {e}");
+        std::process::exit(1);
+    });
+
+    let decoded = image::load_from_memory(&image_bytes)
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to decode image: {e}");
+            std::process::exit(1);
+        })
+        .to_rgba8();
+
+    let (img_w, img_h) = decoded.dimensions();
+
+    // Cap the initial window size so huge images don't fill the screen.
+    let max_dim = 500.0_f32;
+    let scale = (max_dim / img_w.max(img_h) as f32).min(1.0);
+    let start_size = [img_w as f32 * scale, img_h as f32 * scale];
+
+    let options = eframe::NativeOptions {
+        viewport: ViewportBuilder::default()
+            .with_inner_size(start_size)
+            .with_min_inner_size([32.0, 32.0])
+            .with_decorations(false) // no title bar / borders
+            .with_transparent(true) // let the desktop show through
+            .with_always_on_top() // stay above other windows
+            .with_resizable(false) // we resize manually via scroll
+            .with_taskbar(false), // optional: hide from taskbar
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "floating orange",
+        options,
+        Box::new(move |cc| {
+            Ok(Box::new(FloatingImageApp::new(
+                cc, decoded, img_w, img_h,
+            )))
+        }),
+    )
+}
+
+struct FloatingImageApp {
+    texture: egui::TextureHandle,
+    aspect: f32,
+    current_size: egui::Vec2,
+    initialized: bool,
+    bounce_start: Option<f32>, // time the bounce was triggered, if active
+}
+
+impl FloatingImageApp {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        rgba: image::RgbaImage,
+        img_w: u32,
+        img_h: u32,
+    ) -> Self {
+        let color_image =
+            egui::ColorImage::from_rgba_unmultiplied([img_w as usize, img_h as usize], &rgba);
+        let texture =
+            cc.egui_ctx
+                .load_texture("floating_image", color_image, Default::default());
+
+        let max_dim = 500.0_f32;
+        let scale = (max_dim / img_w.max(img_h) as f32).min(1.0);
+
+        Self {
+            texture,
+            aspect: img_w as f32 / img_h as f32,
+            current_size: egui::vec2(img_w as f32 * scale, img_h as f32 * scale),
+            initialized: false,
+            bounce_start: None,
+        }
+    }
+}
+
+impl eframe::App for FloatingImageApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Rgba::TRANSPARENT.to_array()
+    }
+
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.initialized {
+            self.initialized = true;
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_size));
+            ctx.request_repaint();
+        }
+
+        let now = ctx.input(|i| i.time) as f32;
+
+        // --- Compute squash/stretch factor if a bounce is active ---
+        let bounce_duration = 0.4; // seconds, total time for the bounce to settle
+        let bounce_strength = 0.18; // how extreme the squash is
+
+        let (squash_x, squash_y) = if let Some(start) = self.bounce_start {
+            let elapsed = now - start;
+            if elapsed >= bounce_duration {
+                self.bounce_start = None;
+                (1.0, 1.0)
+            } else {
+                // Damped oscillation: sine wave that decays to 0 over the duration.
+                let progress = elapsed / bounce_duration;
+                let decay = 1.0 - progress; // linear falloff, could ease this too
+                let wave = (progress * std::f32::consts::PI * 3.0).sin() * decay;
+                (1.0 + bounce_strength * wave, 1.0 - bounce_strength * wave)
+            }
+        } else {
+            (1.0, 1.0)
+        };
+
+        let animated_size = egui::vec2(
+            self.current_size.x * squash_x,
+            self.current_size.y * squash_y,
+        );
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                let avail = ui.available_size();
+                let offset = (avail - animated_size) * 0.5;
+
+                ui.allocate_ui_at_rect(
+                    egui::Rect::from_min_size(ui.min_rect().min + offset, animated_size),
+                    |ui| {
+                        let response = ui.add(
+                            egui::Image::new((self.texture.id(), animated_size))
+                                .sense(egui::Sense::click_and_drag()),
+                        );
+
+                        // Trigger bounce on a plain left click (not a drag).
+                        if response.clicked() {
+                            self.bounce_start = Some(now);
+                        }
+
+                        if response.drag_started() {
+                            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+                        }
+
+                        if response.secondary_clicked() {
+                            ctx.send_viewport_cmd(ViewportCommand::Close);
+                        }
+
+                        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                        if scroll != 0.0 {
+                            let factor = 1.0 + scroll * 0.001;
+                            let new_w = (self.current_size.x * factor).clamp(32.0, 2000.0);
+                            self.current_size = egui::vec2(new_w, new_w / self.aspect);
+                            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_size));
+                        }
+                    },
+                );
+            });
+
+        // Only need continuous repaint while a bounce is actively playing.
+        if self.bounce_start.is_some() {
+            ctx.request_repaint();
+        }
+    }
+}
