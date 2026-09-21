@@ -1,5 +1,5 @@
 // Floating, always-on-top, transparent, draggable image widget with a
-// squash-and-stretch bounce + click sound effect.
+// squash-and-stretch bounce + click sound effect + floating text.
 //
 // Usage:
 //   cargo run --release                    -> uses default "image.png" in project root
@@ -73,6 +73,7 @@ struct FloatingImageApp {
     initialized: bool,
 
     bounce_start: Option<f32>,
+    text_spawn_time: Option<f32>, // Tracks when the floating text was triggered
 
     _device_sink: MixerDeviceSink,
     click_sound_bytes: Option<Arc<Vec<u8>>>,
@@ -112,6 +113,7 @@ impl FloatingImageApp {
             current_size: egui::vec2(img_w as f32 * scale, img_h as f32 * scale),
             initialized: false,
             bounce_start: None,
+            text_spawn_time: None,
             _device_sink: device_sink,
             click_sound_bytes,
         }
@@ -140,14 +142,15 @@ impl eframe::App for FloatingImageApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if !self.initialized {
             self.initialized = true;
-            // Tell the OS window to be 25% larger than the image
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_size * WINDOW_BUFFER));
             ctx.request_repaint();
         }
 
         let now = ctx.input(|i| i.time) as f32;
+        
+        // Bounce Animation Logic
         let bounce_duration = 0.4;
-        let bounce_strength = 0.18; // Max stretch is +18%. Our 25% window buffer absorbs this!
+        let bounce_strength = 0.18; 
 
         let (squash_x, squash_y) = if let Some(start) = self.bounce_start {
             let elapsed = now - start;
@@ -173,7 +176,6 @@ impl eframe::App for FloatingImageApp {
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let avail = ui.available_size();
-                // This offset now naturally centers the image inside our 25% larger OS window
                 let offset = (avail - animated_size) * 0.5;
                 let rect = egui::Rect::from_min_size(ui.min_rect().min + offset, animated_size);
 
@@ -191,6 +193,7 @@ impl eframe::App for FloatingImageApp {
 
                     if response.clicked() {
                         self.bounce_start = Some(now);
+                        self.text_spawn_time = Some(now); // Trigger text animation
                         self.play_click_sound();
                     }
 
@@ -204,18 +207,62 @@ impl eframe::App for FloatingImageApp {
 
                     let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                     if scroll != 0.0 {
-                        // Keep image size tracking the scroll
                         let factor = 1.0 + scroll * 0.001;
                         let new_w = (self.current_size.x * factor).clamp(32.0, 2000.0);
                         self.current_size = egui::vec2(new_w, new_w / self.aspect);
                         
-                        // Scale the invisible OS window to maintain the 25% buffer
                         ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_size * WINDOW_BUFFER));
                     }
                 });
+
+                // --- Floating Text Render Logic ---
+                let text_duration = 0.5;
+                if let Some(text_start) = self.text_spawn_time {
+                    let elapsed = now - text_start;
+                    if elapsed >= text_duration {
+                        self.text_spawn_time = None;
+                    } else {
+                        let progress = elapsed / text_duration; // 0.0 to 1.0
+                        let alpha = 1.0 - progress; // Fades out to 0
+                        let float_offset = progress * 40.0; // Floats up 40 pixels
+
+                        // Calculate centered position
+                        let center_x = rect.center().x;
+                        
+                        // Shift the starting Y position up by 35% of the image height
+                        let start_y = rect.center().y - (rect.height() * 0.20); 
+                        
+                        // Apply the float-up animation to the new, higher starting point
+                        let center_y = start_y - float_offset;
+
+                        let text = "Meow!";
+                        // Dynamically scale text with image size
+                        let font_size = (self.current_size.x * 0.15).clamp(16.0, 72.0); 
+                        let font_id = egui::FontId::proportional(font_size);
+
+                        // Draw Shadow for readability
+                        ui.painter().text(
+                            egui::pos2(center_x + 2.0, center_y + 2.0),
+                            egui::Align2::CENTER_CENTER,
+                            text,
+                            font_id.clone(),
+                            egui::Color32::from_rgba_unmultiplied(255, 165, 0, (255.0 * alpha) as u8),
+                        );
+
+                        // Draw Main White Text
+                        ui.painter().text(
+                            egui::pos2(center_x, center_y),
+                            egui::Align2::CENTER_CENTER,
+                            text,
+                            font_id,
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * alpha) as u8),
+                        );
+                    }
+                }
             });
 
-        if self.bounce_start.is_some() {
+        // Request continuous repaint if either animation is active
+        if self.bounce_start.is_some() || self.text_spawn_time.is_some() {
             ctx.request_repaint();
         }
     }
