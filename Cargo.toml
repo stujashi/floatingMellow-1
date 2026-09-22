@@ -8,3 +8,6 @@ eframe = "0.29"
 egui = "0.29"
 image = "0.25"
 rodio = { version = "0.22.2", features = ["symphonia-mp3"] }
+
+[build-dependencies]
+winres = "0.1"

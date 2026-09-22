@@ -1,9 +1,4 @@
-// Floating, always-on-top, transparent, draggable image widget with a
-// squash-and-stretch bounce + click sound effect + floating text.
-//
-// Usage:
-//   cargo run --release                    -> uses default "image.png" in project root
-//   cargo run --release -- path/to/img.png -> uses a specific image
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // Hides the console window on release builds
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -12,23 +7,26 @@ use eframe::egui;
 use egui::{ViewportBuilder, ViewportCommand};
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
 
-const DEFAULT_IMAGE_PATH: &str = "image.png";
-const CLICK_SOUND_PATH: &str = "assets/click.mp3";
+// 1. EMBED THE ASSETS AT COMPILE TIME
+// These paths are relative to this `main.rs` file.
+const EMBEDDED_IMAGE: &[u8] = include_bytes!("../image.png"); 
+const EMBEDDED_SOUND: &[u8] = include_bytes!("../assets/click.mp3");
+
 const CLICK_VOLUME: f32 = 0.4;
 const MAX_DIM: f32 = 400.0;
-// We make the invisible OS window 25% larger than the image.
-// This prevents cropping during fast zooming (OS lag) and bounce stretching.
 const WINDOW_BUFFER: f32 = 1.25; 
 
 fn main() -> eframe::Result<()> {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_IMAGE_PATH.to_string());
-
-    let image_bytes = std::fs::read(&path).unwrap_or_else(|e| {
-        eprintln!("Failed to read image at '{path}': {e}");
-        std::process::exit(1);
-    });
+    // Allow dragging and dropping an image onto the exe to override, 
+    // otherwise fallback to the embedded image!
+    let image_bytes = if let Some(path) = std::env::args().nth(1) {
+        std::fs::read(&path).unwrap_or_else(|e| {
+            eprintln!("Failed to read image at '{path}': {e}");
+            std::process::exit(1);
+        })
+    } else {
+        EMBEDDED_IMAGE.to_vec()
+    };
 
     let decoded = image::load_from_memory(&image_bytes)
         .unwrap_or_else(|e| {
@@ -39,9 +37,16 @@ fn main() -> eframe::Result<()> {
 
     let (img_w, img_h) = decoded.dimensions();
 
+    // --- NEW: Create the window/taskbar icon from our decoded image ---
+    let icon_data = egui::IconData {
+        rgba: decoded.clone().into_raw(),
+        width: img_w,
+        height: img_h,
+    };
+    // ------------------------------------------------------------------
+
     let scale = (MAX_DIM / img_w.max(img_h) as f32).min(1.0);
     
-    // Apply the 25% buffer to the initial window size
     let start_size = [
         (img_w as f32 * scale) * WINDOW_BUFFER, 
         (img_h as f32 * scale) * WINDOW_BUFFER
@@ -55,12 +60,13 @@ fn main() -> eframe::Result<()> {
             .with_transparent(true) 
             .with_always_on_top()   
             .with_resizable(false)  
-            .with_taskbar(false),   
+            .with_taskbar(false)
+            .with_icon(std::sync::Arc::new(icon_data)), // <- NEW: Set the icon here
         ..Default::default()
     };
-
+    
     eframe::run_native(
-        "Floating Image",
+        "Floating Mellow",
         options,
         Box::new(move |cc| Ok(Box::new(FloatingImageApp::new(cc, decoded, img_w, img_h)))),
     )
@@ -73,10 +79,10 @@ struct FloatingImageApp {
     initialized: bool,
 
     bounce_start: Option<f32>,
-    text_spawn_time: Option<f32>, // Tracks when the floating text was triggered
+    text_spawn_time: Option<f32>, 
 
     _device_sink: MixerDeviceSink,
-    click_sound_bytes: Option<Arc<Vec<u8>>>,
+    click_sound_bytes: Arc<Vec<u8>>, // No longer optional, since it's embedded
 }
 
 impl FloatingImageApp {
@@ -97,16 +103,6 @@ impl FloatingImageApp {
         let device_sink = DeviceSinkBuilder::open_default_sink()
             .expect("failed to open default audio output device");
 
-        let click_sound_bytes = match std::fs::read(CLICK_SOUND_PATH) {
-            Ok(bytes) => Some(Arc::new(bytes)),
-            Err(e) => {
-                eprintln!(
-                    "Warning: couldn't load click sound at '{CLICK_SOUND_PATH}': {e} (continuing without sound)"
-                );
-                None
-            }
-        };
-
         Self {
             texture,
             aspect: img_w as f32 / img_h as f32,
@@ -115,15 +111,15 @@ impl FloatingImageApp {
             bounce_start: None,
             text_spawn_time: None,
             _device_sink: device_sink,
-            click_sound_bytes,
+            // 2. LOAD THE EMBEDDED SOUND
+            click_sound_bytes: Arc::new(EMBEDDED_SOUND.to_vec()),
         }
     }
 
     fn play_click_sound(&self) {
-        let Some(bytes) = self.click_sound_bytes.clone() else { return };
         let player = Player::connect_new(&self._device_sink.mixer());
 
-        match rodio::Decoder::try_from(Cursor::new((*bytes).clone())) {
+        match rodio::Decoder::try_from(Cursor::new((*self.click_sound_bytes).clone())) {
             Ok(source) => {
                 player.append(source);
                 player.set_volume(CLICK_VOLUME);
@@ -148,7 +144,6 @@ impl eframe::App for FloatingImageApp {
 
         let now = ctx.input(|i| i.time) as f32;
         
-        // Bounce Animation Logic
         let bounce_duration = 0.4;
         let bounce_strength = 0.18; 
 
@@ -193,7 +188,7 @@ impl eframe::App for FloatingImageApp {
 
                     if response.clicked() {
                         self.bounce_start = Some(now);
-                        self.text_spawn_time = Some(now); // Trigger text animation
+                        self.text_spawn_time = Some(now);
                         self.play_click_sound();
                     }
 
@@ -215,53 +210,43 @@ impl eframe::App for FloatingImageApp {
                     }
                 });
 
-                // --- Floating Text Render Logic ---
                 let text_duration = 0.5;
                 if let Some(text_start) = self.text_spawn_time {
                     let elapsed = now - text_start;
                     if elapsed >= text_duration {
                         self.text_spawn_time = None;
                     } else {
-                        let progress = elapsed / text_duration; // 0.0 to 1.0
-                        let alpha = 1.0 - progress; // Fades out to 0
-                        let float_offset = progress * 40.0; // Floats up 40 pixels
+                        let progress = elapsed / text_duration; 
+                        let alpha = 1.0 - progress; 
+                        let float_offset = progress * 40.0; 
 
-                        // Calculate centered position
                         let center_x = rect.center().x;
-                        
-                        // Shift the starting Y position up by 35% of the image height
                         let start_y = rect.center().y - (rect.height() * 0.20); 
-                        
-                        // Apply the float-up animation to the new, higher starting point
                         let center_y = start_y - float_offset;
 
                         let text = "Meow!";
-                        // Dynamically scale text with image size
                         let font_size = (self.current_size.x * 0.15).clamp(16.0, 72.0); 
                         let font_id = egui::FontId::proportional(font_size);
 
-                        // Draw Shadow for readability
                         ui.painter().text(
                             egui::pos2(center_x + 2.0, center_y + 2.0),
                             egui::Align2::CENTER_CENTER,
                             text,
                             font_id.clone(),
-                            egui::Color32::from_rgba_unmultiplied(255, 165, 0, (255.0 * alpha) as u8),
+                            egui::Color32::from_rgba_unmultiplied(0, 0, 0, (255.0 * alpha) as u8),
                         );
 
-                        // Draw Main White Text
                         ui.painter().text(
                             egui::pos2(center_x, center_y),
                             egui::Align2::CENTER_CENTER,
                             text,
                             font_id,
-                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * alpha) as u8),
+                            egui::Color32::from_rgba_unmultiplied(255, 165, 0, (255.0 * alpha) as u8),
                         );
                     }
                 }
             });
 
-        // Request continuous repaint if either animation is active
         if self.bounce_start.is_some() || self.text_spawn_time.is_some() {
             ctx.request_repaint();
         }
