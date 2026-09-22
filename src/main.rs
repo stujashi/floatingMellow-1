@@ -8,7 +8,6 @@ use egui::{ViewportBuilder, ViewportCommand};
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
 
 // 1. EMBED THE ASSETS AT COMPILE TIME
-// These paths are relative to this `main.rs` file.
 const EMBEDDED_IMAGE: &[u8] = include_bytes!("../image.png"); 
 const EMBEDDED_SOUND: &[u8] = include_bytes!("../assets/click.mp3");
 
@@ -17,8 +16,6 @@ const MAX_DIM: f32 = 400.0;
 const WINDOW_BUFFER: f32 = 1.25; 
 
 fn main() -> eframe::Result<()> {
-    // Allow dragging and dropping an image onto the exe to override, 
-    // otherwise fallback to the embedded image!
     let image_bytes = if let Some(path) = std::env::args().nth(1) {
         std::fs::read(&path).unwrap_or_else(|e| {
             eprintln!("Failed to read image at '{path}': {e}");
@@ -37,13 +34,11 @@ fn main() -> eframe::Result<()> {
 
     let (img_w, img_h) = decoded.dimensions();
 
-    // --- NEW: Create the window/taskbar icon from our decoded image ---
     let icon_data = egui::IconData {
         rgba: decoded.clone().into_raw(),
         width: img_w,
         height: img_h,
     };
-    // ------------------------------------------------------------------
 
     let scale = (MAX_DIM / img_w.max(img_h) as f32).min(1.0);
     
@@ -61,7 +56,7 @@ fn main() -> eframe::Result<()> {
             .with_always_on_top()   
             .with_resizable(false)  
             .with_taskbar(false)
-            .with_icon(std::sync::Arc::new(icon_data)), // <- NEW: Set the icon here
+            .with_icon(std::sync::Arc::new(icon_data)), 
         ..Default::default()
     };
     
@@ -80,9 +75,12 @@ struct FloatingImageApp {
 
     bounce_start: Option<f32>,
     text_spawn_time: Option<f32>, 
+    
+    // NEW: We remember exactly where on the image you clicked!
+    click_pivot: Option<egui::Vec2>, 
 
     _device_sink: MixerDeviceSink,
-    click_sound_bytes: Arc<Vec<u8>>, // No longer optional, since it's embedded
+    click_sound_bytes: Arc<Vec<u8>>, 
 }
 
 impl FloatingImageApp {
@@ -110,8 +108,8 @@ impl FloatingImageApp {
             initialized: false,
             bounce_start: None,
             text_spawn_time: None,
+            click_pivot: None, // Starts empty
             _device_sink: device_sink,
-            // 2. LOAD THE EMBEDDED SOUND
             click_sound_bytes: Arc::new(EMBEDDED_SOUND.to_vec()),
         }
     }
@@ -156,7 +154,7 @@ impl eframe::App for FloatingImageApp {
                 let progress = elapsed / bounce_duration;
                 let decay = 1.0 - progress;
                 let wave = (progress * std::f32::consts::PI * 3.0).sin() * decay;
-                (1.0 + bounce_strength * wave, 1.0 - bounce_strength * wave)
+                (1.0 + bounce_strength * wave, 1.0 + bounce_strength * wave)
             }
         } else {
             (1.0, 1.0)
@@ -171,8 +169,18 @@ impl eframe::App for FloatingImageApp {
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let avail = ui.available_size();
-                let offset = (avail - animated_size) * 0.5;
-                let rect = egui::Rect::from_min_size(ui.min_rect().min + offset, animated_size);
+                
+                // NEW CALCULATIONS: Keep the image anchored to where you clicked! ⚓
+                let pivot = self.click_pivot.unwrap_or(egui::vec2(0.5, 0.5));
+                let base_offset = (avail - self.current_size) * 0.5;
+                let base_rect_min = ui.min_rect().min + base_offset;
+                
+                let pivot_screen_x = base_rect_min.x + self.current_size.x * pivot.x;
+                let pivot_screen_y = base_rect_min.y + self.current_size.y * pivot.y;
+
+                let new_min_x = pivot_screen_x - animated_size.x * pivot.x;
+                let new_min_y = pivot_screen_y - animated_size.y * pivot.y;
+                let rect = egui::Rect::from_min_size(egui::pos2(new_min_x, new_min_y), animated_size);
 
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
                     let response = ui.add(
@@ -187,6 +195,16 @@ impl eframe::App for FloatingImageApp {
                     });
 
                     if response.clicked() {
+                        // Figure out exactly where the mouse was when it clicked
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let r = response.rect;
+                            let px = (pos.x - r.min.x) / r.width();
+                            let py = (pos.y - r.min.y) / r.height();
+                            self.click_pivot = Some(egui::vec2(px.clamp(0.0, 1.0), py.clamp(0.0, 1.0)));
+                        } else {
+                            self.click_pivot = Some(egui::vec2(0.5, 0.5)); // default to center
+                        }
+
                         self.bounce_start = Some(now);
                         self.text_spawn_time = Some(now);
                         self.play_click_sound();
@@ -210,6 +228,7 @@ impl eframe::App for FloatingImageApp {
                     }
                 });
 
+                // --- Floating Text Logic ---
                 let text_duration = 0.5;
                 if let Some(text_start) = self.text_spawn_time {
                     let elapsed = now - text_start;
@@ -220,8 +239,9 @@ impl eframe::App for FloatingImageApp {
                         let alpha = 1.0 - progress; 
                         let float_offset = progress * 40.0; 
 
-                        let center_x = rect.center().x;
-                        let start_y = rect.center().y - (rect.height() * 0.20); 
+                        // Make the text start exactly where you clicked! 🖱️
+                        let center_x = pivot_screen_x;
+                        let start_y = pivot_screen_y; 
                         let center_y = start_y - float_offset;
 
                         let text = "Meow!";
