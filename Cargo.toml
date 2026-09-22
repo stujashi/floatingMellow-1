@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rand = "0.10.3"
 eframe = "0.29"
 egui = "0.29"
 image = "0.25"

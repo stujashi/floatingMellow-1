@@ -239,9 +239,17 @@ impl eframe::App for FloatingImageApp {
                         let alpha = 1.0 - progress; 
                         let float_offset = progress * 40.0; 
 
-                        // Make the text start exactly where you clicked! 🖱️
-                        let center_x = pivot_screen_x;
-                        let start_y = pivot_screen_y; 
+                        // Create a random number between 0.0 and 1.0
+                        let random_x = (text_start * 1234.5678).sin().fract().abs();
+                        let random_y = (text_start * 8765.4321).cos().fract().abs();
+
+                        // Start at 0.2 (20% from the left/top) and add up to 0.6 (which stops at 0.8, or 20% from the right/bottom)
+                        let safe_x = 0.2 + (random_x * 0.6);
+                        let safe_y = 0.1 + (random_y * 0.6);
+
+                        // Place the text using new safe borders
+                        let center_x = rect.min.x + (rect.width() * safe_x);
+                        let start_y = rect.min.y + (rect.height() * safe_y); 
                         let center_y = start_y - float_offset;
 
                         let text = "Meow!";
